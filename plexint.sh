@@ -25,7 +25,7 @@
 #   - Run with sudo: sudo ./plexint.sh
 # ==============================================================================
 
-set -e  # Exit immediately if any command fails
+set -eo pipefail  # Exit immediately if any command fails; catch pipe failures too
 
 # Root is required because this script modifies /etc/fstab (system mount
 # config), installs packages with apt, and manages systemd services.
@@ -86,6 +86,10 @@ else
 
   echo
   read -rp "Enter the mount point (e.g. /mnt/data): " MOUNT_POINT
+  if [[ -z "$MOUNT_POINT" || "$MOUNT_POINT" != /* ]]; then
+    echo "ERROR: Mount point must be an absolute path (e.g. /mnt/data)."
+    exit 1
+  fi
   if [[ ! -d "$MOUNT_POINT" ]]; then
     echo "Creating mount point directory: ${MOUNT_POINT}"
     mkdir -p "$MOUNT_POINT"
@@ -93,6 +97,10 @@ else
 
   echo
   read -rp "Enter the file system type (e.g., ext4, ntfs, xfs, exfat): " FS_TYPE
+  if [[ -z "$FS_TYPE" || "$FS_TYPE" =~ [[:space:]] ]]; then
+    echo "ERROR: Invalid filesystem type."
+    exit 1
+  fi
 
   # If exfat is chosen, assume the system has exFAT support already (e.g., Ubuntu 20.04+).
   if [[ "$FS_TYPE" == "exfat" ]]; then
@@ -115,11 +123,19 @@ else
 
   read -rp "Proceed with adding to /etc/fstab? (y/n): " CONFIRM_MOUNT
   if [[ "$CONFIRM_MOUNT" =~ ^[Yy]$ ]]; then
-    echo "Adding line to /etc/fstab..."
-    echo "${FSTAB_LINE}" >> /etc/fstab
+    # Check if this device/UUID is already in fstab to prevent duplicates
+    if grep -qF "$DEVICE_IDENTIFIER" /etc/fstab; then
+      echo "WARNING: An entry for ${DEVICE_IDENTIFIER} already exists in /etc/fstab. Skipping."
+    else
+      echo "Adding line to /etc/fstab..."
+      echo "${FSTAB_LINE}" >> /etc/fstab
+    fi
     echo "Attempting to mount all file systems now (mount -a)..."
-    mount -a
-    echo "Drive mount process complete."
+    if ! mount -a; then
+      echo "WARNING: mount -a failed. Check the fstab entry. Continuing to Part B..."
+    else
+      echo "Drive mount process complete."
+    fi
   else
     echo "Skipping drive mount configuration."
   fi
@@ -151,7 +167,7 @@ if [[ "$INSTALL_PLEX" =~ ^[Yy]$ ]]; then
   else
     ORIGINAL_USER="$USER"
   fi
-  DOWNLOADS_DIR="$(eval echo ~${ORIGINAL_USER})/Downloads"
+  DOWNLOADS_DIR="$(getent passwd "${ORIGINAL_USER}" | cut -d: -f6)/Downloads"
 
   # Update the package database and install prerequisites:
   #   curl:                For downloading files (used by Plex internally)
@@ -165,15 +181,23 @@ if [[ "$INSTALL_PLEX" =~ ^[Yy]$ ]]; then
 
   # Look for the Plex .deb in the user's Downloads folder. The filename
   # typically looks like "plexmediaserver_1.40.0.1234-abcdef_amd64.deb".
-  PLEX_DEB=$(ls -1 "${DOWNLOADS_DIR}"/plexmediaserver*.deb 2>/dev/null || true)
+  # We use a glob array instead of parsing ls output, which is safer for
+  # filenames with spaces and gives us control over multiple matches.
+  shopt -s nullglob
+  plex_debs=("${DOWNLOADS_DIR}"/plexmediaserver*.deb)
+  shopt -u nullglob
 
-  if [[ -z "$PLEX_DEB" ]]; then
+  if [[ ${#plex_debs[@]} -eq 0 ]]; then
     echo "ERROR: No 'plexmediaserver*.deb' file found in ${DOWNLOADS_DIR}."
     echo "Please place the downloaded Plex .deb file there and rerun if needed."
   else
-    echo "Found Plex .deb file(s):"
-    echo "$PLEX_DEB"
-    echo "Installing Plex Media Server..."
+    if [[ ${#plex_debs[@]} -gt 1 ]]; then
+      echo "Multiple .deb files found. Using the newest one:"
+      PLEX_DEB="$(ls -1t "${plex_debs[@]}" | head -n1)"
+    else
+      PLEX_DEB="${plex_debs[0]}"
+    fi
+    echo "Installing: ${PLEX_DEB}"
 
     # Install the .deb package. dpkg -i may fail if dependencies are missing
     # (it doesn't resolve them automatically). That's OK — apt-get -f install
