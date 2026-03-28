@@ -1,21 +1,34 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Plex Media Server Installer with Drive Mount Setup
 #
-# install_and_mount.sh
+# A two-in-one setup script for building a Plex media server on Ubuntu or
+# Linux Mint. It handles the two things you always need to do when setting
+# up a new media server:
 #
-# This script does two main tasks in one go:
-#  1) Helps you select and mount a drive/partition at boot (via /etc/fstab).
-#  2) Installs Plex Media Server from a local .deb file in your ~/Downloads folder,
-#     and opens port 32400 via UFW.
+#   Part A: Mount your media drive permanently (via /etc/fstab)
+#     - Shows available drives/partitions
+#     - Detects UUID for reliable mounting (doesn't break if device order changes)
+#     - Adds the mount to /etc/fstab so it survives reboots
 #
-# If the user selects 'exfat' as the file system, we do NOT install exfat-fuse or exfat-utils,
-# assuming the Ubuntu-based system already supports exFAT natively (e.g., Ubuntu 20.04+).
+#   Part B: Install Plex Media Server
+#     - Installs from a .deb file you've downloaded to ~/Downloads/
+#     - Handles dependencies automatically
+#     - Enables the Plex service to start on boot
+#     - Opens port 32400 in the firewall (UFW)
 #
+# Prerequisites:
+#   - Ubuntu 20.04+ or Linux Mint 20+
+#   - An external or internal drive for media storage
+#   - Plex .deb file downloaded to ~/Downloads/
+#     (download from https://www.plex.tv/media-server-downloads/)
+#   - Run with sudo: sudo ./plexint.sh
+# ==============================================================================
 
-set -e  # Exit on any error
+set -e  # Exit immediately if any command fails
 
-###############################################################################
-# 0. Root Check
-###############################################################################
+# Root is required because this script modifies /etc/fstab (system mount
+# config), installs packages with apt, and manages systemd services.
 if [[ $EUID -ne 0 ]]; then
   echo "ERROR: This script must be run with sudo (root privileges)."
   exit 1
@@ -26,9 +39,16 @@ echo "   Combined Setup: Drive Mount + Plex Installation"
 echo "======================================================="
 echo
 
-###############################################################################
-# 1. MOUNT DRIVE
-###############################################################################
+# ==================== Part A: Drive Mount Setup ====================
+#
+# Most media servers need a dedicated drive for storing movies, TV shows,
+# music, etc. This section helps mount that drive permanently so it's
+# available after every reboot.
+#
+# We use lsblk to show available drives, then ask the user to pick one.
+# The mount is configured via /etc/fstab using the drive's UUID (not the
+# device path like /dev/sdb1) because device paths can change if you add
+# or remove drives, but UUIDs are permanent identifiers.
 echo "-----------------------------"
 echo " Part A: Drive Mount Setup"
 echo "-----------------------------"
@@ -36,7 +56,8 @@ echo
 echo "Below are the available drives/partitions on your system:"
 echo
 
-# List block devices
+# Show drives with their sizes, types, current mount points, and filesystem
+# types. The -p flag shows full device paths (e.g. /dev/sdb1 not just sdb1).
 lsblk -p -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE
 
 echo
@@ -49,7 +70,10 @@ if [[ ! -b "$DEVICE_PATH" ]]; then
   echo "Aborting drive-mount portion."
   echo
 else
-  # Attempt to get UUID
+  # Try to get the drive's UUID using blkid. UUID is preferred over device
+  # paths in /etc/fstab because /dev/sdX names can change between reboots
+  # (e.g. if you plug in a USB drive before the media drive). UUIDs are
+  # unique identifiers burned into the filesystem and never change.
   UUID_FOUND=$(blkid -s UUID -o value "${DEVICE_PATH}" 2>/dev/null || true)
   if [[ -z "$UUID_FOUND" ]]; then
     echo "WARNING: Could not detect a UUID for '${DEVICE_PATH}'."
@@ -76,7 +100,10 @@ else
     echo "No additional exFAT packages will be installed."
   fi
 
-  # We'll keep it simple: use 'defaults' for mount options, pass=2
+  # Build the fstab entry. "defaults" enables standard mount options
+  # (read/write, auto-mount, etc.). The "0 2" at the end means:
+  #   0 = don't include in dump backups
+  #   2 = fsck checks this drive second (after the root filesystem)
   MOUNT_OPTS="defaults"
   FSTAB_LINE="${DEVICE_IDENTIFIER}  ${MOUNT_POINT}  ${FS_TYPE}  ${MOUNT_OPTS}  0  2"
 
@@ -98,9 +125,15 @@ else
   fi
 fi
 
-###############################################################################
-# 2. INSTALL PLEX
-###############################################################################
+# ==================== Part B: Plex Media Server Installation ====================
+#
+# Plex Media Server is a media streaming server that organises your movies,
+# TV shows, music, and photos and streams them to any device on your network
+# (or remotely over the internet).
+#
+# Plex distributes Linux packages as .deb files (for Debian/Ubuntu/Mint).
+# The user must download it manually from plex.tv because it requires
+# accepting their terms of service. We look for it in ~/Downloads/.
 echo
 echo "-----------------------------"
 echo " Part B: Plex Installation"
@@ -110,8 +143,9 @@ echo
 read -rp "Would you like to install Plex Media Server now? (y/n): " INSTALL_PLEX
 if [[ "$INSTALL_PLEX" =~ ^[Yy]$ ]]; then
 
-  # 2.1. Identify the original user for the Downloads folder
-  # (so we can find the .deb in ~<user>/Downloads)
+  # Figure out the real user's home directory. When running with sudo,
+  # $USER is "root" but $SUDO_USER is the person who typed "sudo".
+  # We need their Downloads folder, not root's.
   if [[ -n "$SUDO_USER" ]]; then
     ORIGINAL_USER="$SUDO_USER"
   else
@@ -119,15 +153,18 @@ if [[ "$INSTALL_PLEX" =~ ^[Yy]$ ]]; then
   fi
   DOWNLOADS_DIR="$(eval echo ~${ORIGINAL_USER})/Downloads"
 
-  # 2.2. Update system packages
+  # Update the package database and install prerequisites:
+  #   curl:                For downloading files (used by Plex internally)
+  #   apt-transport-https: Allows apt to fetch packages over HTTPS
+  #   gnupg:               GPG key handling for package verification
   echo "Updating package list..."
   apt-get update -y
 
-  # 2.3. Install dependencies
   echo "Installing curl, apt-transport-https, gnupg..."
   apt-get install -y curl apt-transport-https gnupg
 
-  # 2.4. Find the Plex .deb file in ~/Downloads
+  # Look for the Plex .deb in the user's Downloads folder. The filename
+  # typically looks like "plexmediaserver_1.40.0.1234-abcdef_amd64.deb".
   PLEX_DEB=$(ls -1 "${DOWNLOADS_DIR}"/plexmediaserver*.deb 2>/dev/null || true)
 
   if [[ -z "$PLEX_DEB" ]]; then
@@ -138,25 +175,32 @@ if [[ "$INSTALL_PLEX" =~ ^[Yy]$ ]]; then
     echo "$PLEX_DEB"
     echo "Installing Plex Media Server..."
 
-    # Attempt to install
+    # Install the .deb package. dpkg -i may fail if dependencies are missing
+    # (it doesn't resolve them automatically). That's OK — apt-get -f install
+    # runs right after and pulls in any missing dependencies, then retries
+    # the failed package installation.
     dpkg -i "$PLEX_DEB" || true
-
-    # Fix missing dependencies if dpkg complained
     apt-get -f install -y
 
-    # Enable and start Plex
+    # Enable the Plex service so it starts automatically on every boot,
+    # and start it now so the user can access it immediately.
     echo "Enabling Plex Media Server on boot..."
     systemctl enable plexmediaserver.service
 
     echo "Starting Plex Media Server..."
     systemctl start plexmediaserver.service
 
-    # 2.5. Configure firewall
+    # Open port 32400 in the firewall. This is Plex's default web interface
+    # port — without this, other devices on the network can't access the
+    # server. UFW (Uncomplicated Firewall) is the standard firewall on
+    # Ubuntu/Mint.
     echo "Installing ufw (if not installed) and allowing port 32400/tcp..."
     apt-get install -y ufw
     ufw allow 32400/tcp || true
 
-    # Optionally enable ufw (uncomment if desired):
+    # Note: UFW is not enabled by default. Uncomment the line below if you
+    # want to activate the firewall. Be careful — this will block all ports
+    # except those explicitly allowed (like 32400 above and SSH port 22).
     # ufw enable
 
     echo
