@@ -1,5 +1,13 @@
 # Plex Server Setup
 
+## Video Guide
+
+<p align="center">
+  <a href="https://youtu.be/7k0ehGUqF9E">
+    <img src="https://img.youtube.com/vi/7k0ehGUqF9E/0.jpg" width="700">
+  </a>
+</p>
+
 One-script setup for a Plex Media Server on Ubuntu or Linux Mint. Handles drive mounting and Plex installation in a single run.
 
 ## Requirements
